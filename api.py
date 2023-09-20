@@ -7,8 +7,9 @@ class ProcessRequest(BaseModel):
     prompt: str
     num_samples: int = 1
     max_length: int = 512
-    top_k: int = 200
+    top_k: int = 50
     temperature: float = 0.8
+    repetition_penalty: float = 1.15
     seed: Optional[int] = None
     echo_prompt: Optional[bool]
 

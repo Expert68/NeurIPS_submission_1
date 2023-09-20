@@ -36,7 +36,7 @@ def download_from_hub(
     )
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--repo_id", type=str, default='Secbone/llama-2-13B-instructed',help="repo_id")
+parser.add_argument("--repo_id", type=str, default='Secbone/llama-33B-instructed',help="repo_id")
 args = parser.parse_args()
 
 
