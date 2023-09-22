@@ -1,7 +1,7 @@
 # NeurIPS Submission #1
 =======================
-my mail:1413786269@qq.com
-=======================
+- my mail:1413786269@qq.com
+
 
 ### Instructions for Running
 
