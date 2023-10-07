@@ -26,7 +26,7 @@ def download_from_hub(
         )
 
 
-    directory = Path("checkpoints") / repo_id
+    directory = f'llama-33B-instructed'
     snapshot_download(
         repo_id,
         local_dir=directory,

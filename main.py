@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-checkpoint_dir = Path("checkpoints/Secbone/llama-33B-instructed")
+checkpoint_dir = Path("llama-33B-instructed")
 
 logger.info(f'loading tokenizer from {str(checkpoint_dir)}')
 tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_dir),trust_remote_code=True,use_fast=False)
