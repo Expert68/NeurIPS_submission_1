@@ -1,22 +1,14 @@
 from fastapi import FastAPI
+
 import logging
-
-import sys
+import os
 import time
-from pathlib import Path
-import random
-import numpy as np
-import json, os
-from transformers import LlamaForCausalLM, LlamaTokenizer,AutoModelForCausalLM,AutoTokenizer
-
-wd = Path(__file__).parent.parent.resolve()
-sys.path.append(str(wd))
-
-max_seed_value = np.iinfo(np.uint32).max
-min_seed_value = np.iinfo(np.uint32).min
 
 import torch
-torch.set_float32_matmul_precision('high')
+from huggingface_hub import login
+from transformers import LlamaTokenizer, LlamaForCausalLM, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+# torch.set_float32_matmul_precision("high")
 
 from api import (
     ProcessRequest,
@@ -24,132 +16,105 @@ from api import (
     TokenizeRequest,
     TokenizeResponse,
     Token,
-    DecodeRequest,
-    DecodeResponse
 )
 
 app = FastAPI()
 
 logger = logging.getLogger(__name__)
+# Configure the logging module
 logging.basicConfig(level=logging.INFO)
 
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-checkpoint_dir = Path("llama-33B-instructed")
+bnb_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type="nf4",
+    bnb_4bit_compute_dtype=torch.float16,
+)
 
-logger.info(f'loading tokenizer from {str(checkpoint_dir)}')
-tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_dir),trust_remote_code=True,use_fast=False)
-tokenizer.pad_token = tokenizer.unk_token
-
-logger.info(f'loading model from {str(checkpoint_dir)}')
 model = AutoModelForCausalLM.from_pretrained(
-        str(checkpoint_dir),
-        trust_remote_code=True,
-        load_in_8bit=True,
-        torch_dtype=torch.float16,
-        )
+    'Secbone/llama-33B-instructed',
+    return_dict=True,
+    torch_dtype=torch.float16,
+    quantization_config=bnb_config,
+)
 
-meta_instruction = """
-"This is a chat between a curious user and a helpful artificial intelligence assistant. "
-"The assistant gives helpful, detailed, and polite answers to the user's questions with knowledge from web search."
-"""
+model.eval()
 
-def seed_everything(seed):
-    if seed is None:
-        seed = random.randint(min_seed_value,max_seed_value)
-        logger.warning(f'No seed found,set seed to {seed}')
-    seed = int(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+tokenizer = AutoTokenizer.from_pretrained('Secbone/llama-33B-instructed')
 
-    return seed
+LLAMA2_CONTEXT_LENGTH = 2048
 
 
 @app.post("/process")
 async def process_request(input_data: ProcessRequest) -> ProcessResponse:
     if input_data.seed is not None:
-        seed_everything(input_data.seed)
-    logger.info("Using device: {}".format(device))
+        torch.manual_seed(input_data.seed)
 
-    prompt = f"""{meta_instruction}\nUSER:\n{input_data.prompt}\nASSISTANT:"""
-    inputs = tokenizer(prompt,return_tensors="pt",add_special_tokens=True)
-    prompt_length = inputs["input_ids"].shape[-1]
+    encoded = tokenizer(input_data.prompt, return_tensors="pt")
+
+    prompt_length = encoded["input_ids"][0].size(0)
+    max_returned_tokens = prompt_length + input_data.max_new_tokens
+    assert max_returned_tokens <= LLAMA2_CONTEXT_LENGTH, (
+        max_returned_tokens,
+        LLAMA2_CONTEXT_LENGTH,
+    )
 
     t0 = time.perf_counter()
-    tokenizer.pad_token = tokenizer.eos_token
-    generation_outputs = model.generate(inputs['input_ids'].to(device),
-                                        attention_mask=inputs['attention_mask'].to(device),
-                                        return_dict_in_generate=True,
-                                        output_scores=True,
-                                        max_length=input_data.max_length,
-                                        top_k=input_data.top_k,
-                                        temperature=input_data.temperature,
-                                        repetition_penalty=input_data.repetition_penalty,
-                                        do_sample=True)
+    encoded = {k: v.to("cuda") for k, v in encoded.items()}
+    with torch.no_grad():
+        outputs = model.generate(
+            **encoded,
+            max_new_tokens=input_data.max_new_tokens,
+            do_sample=True,
+            temperature=input_data.temperature,
+            top_k=input_data.top_k,
+            return_dict_in_generate=True,
+            output_scores=True,
+        )
 
     t = time.perf_counter() - t0
-
-    transition_scores= model.compute_transition_scores(
-        generation_outputs.sequences, generation_outputs.scores, normalize_logits=True
-    )
-    logprobs = transition_scores[0].cpu().numpy().tolist()
-    # for tok, score in zip(generation_outputs.sequences[:,prompt_length:][0], transition_scores[0]):
-    #     logprobs.append((tok.item(),score.item()))
-
-    scores = torch.nn.functional.log_softmax(torch.stack(generation_outputs.scores),dim=-1)
-
-    top_logprobs = []
-    for score in scores:
-        tok = torch.argmax(score).item()
-        top_logprob = torch.max(score, dim=-1)[0].item()
-        top_logprobs.append((tok,top_logprob))
-
-    tokens = generation_outputs.sequences
-
-    if input_data.echo_prompt is False:
-        output = tokenizer.decode(tokens.cpu()[0][prompt_length:],skip_special_tokens=True)
+    if not input_data.echo_prompt:
+        output = tokenizer.decode(outputs.sequences[0][prompt_length:], skip_special_tokens=True)
     else:
-        output = tokenizer.decode(tokens.cpu()[0],skip_special_tokens=True)
+        output = tokenizer.decode(outputs.sequences[0], skip_special_tokens=True)
 
-    tokens_generated = tokens.size(0) - prompt_length
-
+    tokens_generated = outputs.sequences[0].size(0) - prompt_length
     logger.info(
         f"Time for inference: {t:.02f} sec total, {tokens_generated / t:.02f} tokens/sec"
     )
 
     logger.info(f"Memory used: {torch.cuda.max_memory_reserved() / 1e9:.02f} GB")
     generated_tokens = []
-    for t, lp, tlp in zip(tokens.cpu()[0][prompt_length:].numpy().tolist(), logprobs, top_logprobs):
+
+    log_probs = torch.log(torch.stack(outputs.scores, dim=1).softmax(-1))
+
+    gen_sequences = outputs.sequences[:, encoded["input_ids"].shape[-1]:]
+    gen_logprobs = torch.gather(log_probs, 2, gen_sequences[:, :, None]).squeeze(-1)
+
+    top_indices = torch.argmax(log_probs, dim=-1)
+    top_logprobs = torch.gather(log_probs, 2, top_indices[:, :, None]).squeeze(-1)
+    top_indices = top_indices.tolist()[0]
+    top_logprobs = top_logprobs.tolist()[0]
+
+    for t, lp, tlp in zip(gen_sequences.tolist()[0], gen_logprobs.tolist()[0], zip(top_indices, top_logprobs)):
         idx, val = tlp
-        tok_str = tokenizer.decode([idx])
+        tok_str = tokenizer.decode(idx)
         token_tlp = {tok_str: val}
         generated_tokens.append(
             Token(text=tokenizer.decode(t), logprob=lp, top_logprob=token_tlp)
         )
-    logprobs_sum = sum(logprobs)
-    # Process the input data here
+    logprob_sum = gen_logprobs.sum().item()
+
     return ProcessResponse(
-        text=output, tokens=generated_tokens, logprob=logprobs_sum, request_time=t
+        text=output, tokens=generated_tokens, logprob=logprob_sum, request_time=t
     )
+
 
 @app.post("/tokenize")
 async def tokenize(input_data: TokenizeRequest) -> TokenizeResponse:
-    logger.info("Using device: {}".format(device))
     t0 = time.perf_counter()
-    encoded = tokenizer.encode(
-        input_data.text,
-        add_special_tokens=True
+    encoded = tokenizer(
+        input_data.text
     )
     t = time.perf_counter() - t0
-    tokens = encoded
+    tokens = encoded["input_ids"]
     return TokenizeResponse(tokens=tokens, request_time=t)
-
-@app.post("/decode")
-async def decode(input_data: DecodeRequest) -> DecodeResponse:
-    logger.info("Using device: {}".format(device))
-    t0 = time.perf_counter()
-    decoded = tokenizer.decode(input_data.tokens)
-    t = time.perf_counter() - t0
-    return DecodeResponse(text=decoded, request_time=t)
-

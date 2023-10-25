@@ -3,11 +3,6 @@
 
 ### Instructions for Running
 
-Note: Before running the Docker image, please ensure that the desired port is available on your system.
-```
-docker build -t neurlips_submission_1 .
-docker run --gpus all -p 80:80 -it neurlips_submission_1:latest
-```
 IMPORTANT: Due to network constraints, I was unable to test the download_weights.py script. If you encounter any issues with this script, you can manually download the weights from this link on Hugging Face.
 https://huggingface.co/Secbone/llama-33B-instructed/tree/main
 
