@@ -1,5 +1,8 @@
 # NeurIPS Submission #1
 =======================
+- my mail:1413786269@qq.com
+- collaborator:Secbone(https://github.com/Secbone)  mail:secbone@gmail.com
+
 
 ### Instructions for Running
 
